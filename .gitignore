@@ -1,0 +1,12 @@
+node_modules/
+main.js
+*.log
+artifacts/
+dist/
+previews/
+COMPARISON.md
+.DS_Store
+.env
+.env.*
+scripts/*.mjs
+!scripts/validate-release.mjs
