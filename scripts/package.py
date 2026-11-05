@@ -4,7 +4,7 @@ root=Path(__file__).resolve().parent.parent
 manifest=json.loads((root/'manifest.json').read_text())
 plugin_id=manifest['id']
 assert plugin_id=='simple-memo'
-files=['main.js','styles.css','manifest.json','README.md','README.zh-CN.md','LICENSE']
+files=['main.js','styles.css','manifest.json','README.md','README.zh-CN.md','LICENSE','docs/screenshots/simple-memo.png']
 assert all((root/name).is_file() for name in files)
 folder=root/'dist'; folder.mkdir(exist_ok=True)
 output=folder/f"simple-memo-{manifest['version']}.zip"

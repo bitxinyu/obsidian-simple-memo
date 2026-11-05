@@ -4,6 +4,8 @@
 
 Local memos for Obsidian, stored in your daily Markdown notes. No account or subscription required.
 
+![Simple Memo with example notes](docs/screenshots/simple-memo.png)
+
 ## Features
 
 - Quick capture, Markdown previews, and saved drafts

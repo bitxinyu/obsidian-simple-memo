@@ -19,7 +19,7 @@ assert.ok(manifest.description.length <= 250 && manifest.description.endsWith('.
 if (process.env.GITHUB_REF_TYPE === 'tag') {
   assert.equal(process.env.GITHUB_REF_NAME, manifest.version, 'Release tag must match manifest.version');
 }
-for (const name of ['main.js', 'manifest.json', 'styles.css', 'README.md', 'README.zh-CN.md', 'LICENSE']) {
+for (const name of ['main.js', 'manifest.json', 'styles.css', 'README.md', 'README.zh-CN.md', 'LICENSE', 'docs/screenshots/simple-memo.png']) {
   assert.ok(statSync(fileURLToPath(new URL(name, root))).size > 0, `${name} is missing or empty`);
 }
 console.log(`Release files validated: ${manifest.id} ${manifest.version}`);

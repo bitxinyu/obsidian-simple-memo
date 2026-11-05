@@ -4,6 +4,8 @@
 
 一个 Obsidian 本地便签插件。便签保存在日记中，无需账号或订阅。
 
+![Simple Memo 演示界面](docs/screenshots/simple-memo.png)
+
 ## 功能
 
 - 快速记录、Markdown 预览、草稿自动保存
