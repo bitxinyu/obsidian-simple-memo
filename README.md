@@ -35,8 +35,6 @@ New installations save daily notes in `Journal`. To use existing notes, set the 
 
 Simple Memo reads Thino-style daily memos, including pinned and archived states. On first use, it imports supported Thino settings when they are present. Only daily-note sources are supported. This is an independent implementation, unaffiliated with Thino.
 
-Earlier local Simple Memo versions used the ID `simple-thino`. Disable that version before enabling this one. Settings, drafts, and recycle-bin entries are copied automatically; daily notes and old plugin files are preserved. Custom command hotkeys need to be reassigned.
-
 ## Data and compatibility
 
 Memo text stays in your daily notes. Drafts and recycle-bin entries are stored in `.obsidian/plugins/simple-memo/data.json`; include that file in backups. Attachments are saved in the vault's `附件` folder.
