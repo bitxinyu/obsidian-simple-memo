@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { defaultSettings } from '../src/settings';
 import { parseMemos } from '../src/core';
+import { emptyFilter } from '../src/filters';
 import type SimpleMemoPlugin from '../src/main';
 import type { PluginData } from '../src/types';
 
@@ -325,4 +326,49 @@ test('literal code samples cannot hide, archive or pin a memo and survive metada
   await plugin.setMeta(archived, { archived: false });
   assert.equal(plugin.list()[0].content, content);
   assert.equal(plugin.data.meta[plugin.list()[0].key].archived, false);
+});
+
+test('saved filters survive reload and updates without changing journal content or drafts', async () => {
+  const { plugin, state, createPlugin } = await fixture('- 09:00 original #工作 ^original\n');
+  const notes = new Map(state.contents);
+  plugin.data.draft = '未完成的草稿';
+  const filter = { ...emptyFilter(), tags: ['工作'], period: 'thisWeek' as const };
+  const id = await plugin.saveFilter('本周工作', filter);
+  filter.tags.push('不应该改变已保存的筛选');
+  const reloaded = createPlugin();
+  await reloaded.onload();
+  assert.equal(reloaded.data.savedFilters?.[0].id, id);
+  assert.deepEqual(reloaded.data.savedFilters?.[0].filter.tags, ['工作']);
+  assert.equal(reloaded.data.draft, '未完成的草稿');
+  await reloaded.saveFilter('本周未完成', { ...emptyFilter(), status: 'open', period: 'thisWeek' }, id);
+  assert.equal(state.durable?.savedFilters?.length, 1);
+  assert.equal(state.durable?.savedFilters?.[0].filter.status, 'open');
+  assert.deepEqual(state.contents, notes);
+  await reloaded.deleteFilter(id);
+  assert.deepEqual(state.durable?.savedFilters, []);
+  assert.deepEqual(state.contents, notes);
+});
+
+test('failed preset writes roll back in memory and can be retried', async () => {
+  const { plugin, state } = await fixture();
+  state.failSave = true;
+  await assert.rejects(plugin.saveFilter('工作', emptyFilter()));
+  assert.equal(plugin.data.savedFilters, undefined);
+  const id = await plugin.saveFilter('工作', emptyFilter());
+  const previous = clone(plugin.data.savedFilters);
+  state.failSave = true;
+  await assert.rejects(plugin.saveFilter('改名', emptyFilter(), id));
+  assert.deepEqual(plugin.data.savedFilters, previous);
+  state.failSave = true;
+  await assert.rejects(plugin.deleteFilter(id));
+  assert.deepEqual(plugin.data.savedFilters, previous);
+});
+
+test('concurrent preset saves retain all entries and reject duplicate names', async () => {
+  const { plugin, state } = await fixture();
+  await Promise.all([plugin.saveFilter('甲', emptyFilter()), plugin.saveFilter('乙', emptyFilter())]);
+  assert.equal(state.durable?.savedFilters?.length, 2);
+  await assert.rejects(plugin.saveFilter('甲', emptyFilter()), /同名/);
+  await assert.rejects(plugin.saveFilter('无效', emptyFilter(), 'deleted'), /已被删除/);
+  assert.equal(plugin.data.savedFilters?.length, 2);
 });

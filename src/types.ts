@@ -54,6 +54,22 @@ export interface ImportReport {
     mapped: string[];
     warnings: string[];
 }
+export type MemoFeed = 'all' | 'today' | 'tasks' | 'pinned' | 'archived' | 'trash';
+export interface MemoFilter {
+    feed: MemoFeed;
+    text: string;
+    tags: string[];
+    status: 'any' | 'open' | 'done' | 'note';
+    period: 'all' | 'custom' | 'today' | 'last7' | 'thisWeek' | 'thisMonth';
+    from: string;
+    to: string;
+    oldestFirst: boolean;
+}
+export interface SavedFilter {
+    id: string;
+    name: string;
+    filter: MemoFilter;
+}
 export interface PluginData {
     version: 1;
     settings: Settings;
@@ -63,6 +79,7 @@ export interface PluginData {
     draft: string;
     quickDraft?: string;
     legacyTrashImported?: boolean;
+    savedFilters?: SavedFilter[];
 }
 export interface MemoController {
     settings: Settings;
@@ -79,5 +96,7 @@ export interface MemoController {
     copyLink(memo: Memo): Promise<void>;
     attach(file: File): Promise<string>;
     saveDraft(text: string): void;
+    saveFilter(name: string, filter: MemoFilter, id?: string): Promise<string>;
+    deleteFilter(id: string): Promise<void>;
     refresh(): Promise<void>;
 }

@@ -12,6 +12,7 @@ Local memos for Obsidian, stored in your daily Markdown notes. No account or sub
 - Tags, search, date filters, a calendar, and an activity heatmap
 - Tasks, pinned memos, archives, and a recoverable recycle bin
 - Image and file attachments, and random review
+- Tag and link completion, saved combined filters, and bulk copying
 
 ## Install
 
@@ -37,7 +38,7 @@ Simple Memo reads Thino-style daily memos, including pinned and archived states.
 
 ## Data and compatibility
 
-Memo text stays in your daily notes. Drafts and recycle-bin entries are stored in `.obsidian/plugins/simple-memo/data.json`; include that file in backups. Attachments are saved in the vault's `附件` folder.
+Memo text stays in your daily notes. Drafts, recycle-bin entries, and saved filters are stored in `.obsidian/plugins/simple-memo/data.json`; include that file in backups. Attachments are saved in the vault's `附件` folder.
 
 The plugin does not make its own network requests or provide a sync service. Existing vault sync continues to handle your files. External images in memo content may load through Obsidian's Markdown renderer.
 

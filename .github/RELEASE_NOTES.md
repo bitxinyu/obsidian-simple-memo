@@ -1,10 +1,9 @@
-First public release of Simple Memo.
+Simple Memo 1.1.0
 
-- Local memos stored in daily Markdown notes.
-- Markdown preview, tasks, tags, search, calendar, heatmap, and attachments.
-- Pinning, archiving, random review, drafts, and a recoverable recycle bin.
-- Thino daily-note compatibility.
+- Tag and note-link completion.
+- Saved combined filters with date ranges.
+- Copy all filtered memos as date-grouped Markdown, with optional source links.
 
-Requires Obsidian 1.7.2 or later. Tested on macOS with Obsidian 1.14.4; mobile-device testing is still pending. The interface is currently in Simplified Chinese.
+Requires Obsidian 1.7.2 or later.
 
 For manual installation, extract the ZIP into your vault's `.obsidian/plugins/` folder and enable Simple Memo.

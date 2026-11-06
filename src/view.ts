@@ -2,24 +2,13 @@ import {
   App, Component, ItemView, MarkdownRenderer, Menu, Modal, Notice,
   Scope, setIcon, WorkspaceLeaf,
 } from 'obsidian';
-import type { Memo, MemoController, TrashEntry } from './types';
+import type { Memo, MemoController, MemoFilter, TrashEntry } from './types';
+import { attachSuggestions } from './suggest';
+import { FilterModal, FEEDS } from './filter-modal';
+import { emptyFilter, dateBounds, filterMemos, localDate, matchesMemo, memosToMarkdown, PERIOD_LABELS, STATUS_LABELS, validateFilter } from './filters';
 import { removeCommonIndent } from './core';
 
 export const VIEW_TYPE = 'simple-memo-view';
-
-type Feed = 'all' | 'today' | 'tasks' | 'pinned' | 'archived' | 'trash';
-const FEEDS: { id: Feed; label: string }[] = [
-  { id: 'all', label: '全部' },
-  { id: 'today', label: '今天' },
-  { id: 'tasks', label: '待办' },
-  { id: 'pinned', label: '置顶' },
-  { id: 'archived', label: '归档' },
-  { id: 'trash', label: '回收站' },
-];
-
-function localDate(date = new Date()): string {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -96,11 +85,10 @@ async function renderMarkdown(app: App, memo: Memo, parent: HTMLElement, compone
 export class MemoView extends ItemView {
   private readonly controller: MemoController;
   private unsubscribe?: () => void;
-  private feed: Feed = 'all';
-  private search = '';
-  private tag = '';
-  private date = '';
-  private oldestFirst = false;
+  private filter = emptyFilter();
+  private activeFilterId = '';
+  private clearSuggestions?: () => void;
+  private searchInput!: HTMLInputElement;
   private limit = 50;
   private calendarMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
   private showSidebar: boolean;
@@ -121,12 +109,8 @@ export class MemoView extends ItemView {
   private resultCount!: HTMLElement;
   private dailyGoal!: HTMLElement;
   private filterRow!: HTMLElement;
-  private tagFilter!: HTMLButtonElement;
-  private dateInput!: HTMLInputElement;
   private dateButton!: HTMLButtonElement;
   private sidebarButton!: HTMLButtonElement;
-  private refreshIndentAction!: () => void;
-  private datePickerOpen = false;
   private activityMode: 'calendar' | 'heatmap' = 'heatmap';
 
   constructor(leaf: WorkspaceLeaf, controller: MemoController) {
@@ -165,6 +149,7 @@ export class MemoView extends ItemView {
     this.unsubscribe?.();
     this.unsubscribe = undefined;
     this.clearRendering();
+    this.clearSuggestions?.();
   }
 
   private async action(action: () => Promise<void>): Promise<void> {
@@ -178,6 +163,7 @@ export class MemoView extends ItemView {
       attr: { placeholder: '现在想记点什么？', 'aria-label': '便签正文', rows: '2' },
     });
     this.editor.value = this.controller.data.draft;
+    this.clearSuggestions = attachSuggestions(this.app, this.controller, this.editor, this.scope!);
     this.editor.oninput = () => this.controller.saveDraft(this.editor.value);
     registerSaveShortcut(this.scope!, this.editor, () => { void this.capture(); });
     this.editor.addEventListener('paste', event => {
@@ -218,7 +204,7 @@ export class MemoView extends ItemView {
     };
     this.attachButton = button(tools, '添加附件', 'paperclip', 'st-icon-button');
     this.attachButton.onclick = () => upload.click();
-    this.refreshIndentAction = addIndentAction(tools, this.editor);
+    addIndentAction(tools, this.editor);
     this.dailyGoal = bottom.createSpan({ cls: 'st-daily-goal' });
     this.saveButton = button(bottom, this.controller.settings.saveLabel || '记录', undefined, 'mod-cta st-save');
     this.saveButton.title = '保存便签（⌘ / Ctrl + Enter）';
@@ -235,8 +221,7 @@ export class MemoView extends ItemView {
       await this.controller.capture(content, this.taskInput.checked);
       if (this.editor.value === content) {
         this.editor.value = '';
-        this.controller.saveDraft('');
-        this.refreshIndentAction();
+        this.editor.dispatchEvent(new Event('input', { bubbles: true }));
       }
       this.editor.focus();
       new Notice('已记录');
@@ -260,8 +245,7 @@ export class MemoView extends ItemView {
         const end = this.editor.selectionEnd;
         const leading = start > 0 && this.editor.value[start - 1] !== '\n' ? '\n' : '';
         this.editor.setRangeText(`${leading}${markdown}\n`, start, end, 'end');
-        this.controller.saveDraft(this.editor.value);
-        this.refreshIndentAction();
+        this.editor.dispatchEvent(new Event('input', { bubbles: true }));
       }
       this.editor.focus();
     } catch (error) {
@@ -281,33 +265,32 @@ export class MemoView extends ItemView {
     setIcon(picker.createSpan({ cls: 'st-feed-chevron' }), 'chevron-down');
     for (const feed of FEEDS) this.feedSelect.createEl('option', { value: feed.id, text: feed.label });
     this.feedSelect.onchange = () => {
-      this.feed = this.feedSelect.value as Feed;
-      if (this.feed === 'today') {
-        this.date = '';
-        this.datePickerOpen = false;
-      }
-      this.limit = 50;
-      this.update();
+      this.filter.feed = this.feedSelect.value as MemoFilter['feed'];
+      if (this.filter.feed === 'today') { this.filter.period = 'all'; this.filter.from = ''; this.filter.to = ''; }
+      this.activeFilterId = ''; this.limit = 50; this.update();
     };
     this.resultCount = toolbar.createSpan({ cls: 'st-result-count', attr: { 'aria-live': 'polite' } });
     const searchWrap = toolbar.createDiv({ cls: 'st-search' });
     const searchIcon = searchWrap.createSpan({ cls: 'st-icon' });
     setIcon(searchIcon, 'search');
-    const search = searchWrap.createEl('input', { type: 'search', attr: { placeholder: '搜索', 'aria-label': '搜索便签', title: '搜索内容或 #标签' } });
-    search.oninput = () => { this.search = search.value; this.limit = 50; this.renderResults(); };
-    this.dateButton = button(toolbar, '按日期筛选', 'calendar-days', 'st-icon-button');
-    this.dateButton.onclick = () => {
-      this.datePickerOpen = !this.datePickerOpen;
-      this.updateFilters();
-      if (this.datePickerOpen) this.dateInput.focus();
+    this.searchInput = searchWrap.createEl('input', { type: 'search', attr: { placeholder: '搜索', 'aria-label': '搜索便签', title: '搜索内容或 #标签' } });
+    this.searchInput.oninput = () => {
+      this.filter.text = this.searchInput.value; this.activeFilterId = ''; this.limit = 50;
+      this.updateFilters(); this.renderResults();
     };
+    this.dateButton = button(toolbar, '筛选与保存', 'list-filter', 'st-icon-button');
+    this.dateButton.onclick = () => this.openFilters();
     const more = button(toolbar, '列表选项', 'ellipsis', 'st-icon-button');
     more.onclick = event => {
       const menu = new Menu();
-      menu.addItem(item => item.setTitle('最近优先').setChecked(!this.oldestFirst).onClick(() => { this.oldestFirst = false; this.renderResults(); }));
-      menu.addItem(item => item.setTitle('最早优先').setChecked(this.oldestFirst).onClick(() => { this.oldestFirst = true; this.renderResults(); }));
+      menu.addItem(item => item.setTitle('最近优先').setChecked(!this.filter.oldestFirst).onClick(() => { this.filter.oldestFirst = false; this.renderResults(); }));
+      menu.addItem(item => item.setTitle('最早优先').setChecked(this.filter.oldestFirst).onClick(() => { this.filter.oldestFirst = true; this.renderResults(); }));
       menu.addSeparator();
-      menu.addItem(item => item.setTitle('随机回顾').setIcon('shuffle').setDisabled(this.feed === 'trash').onClick(() => {
+      menu.addItem(item => item.setTitle('筛选与保存').setIcon('list-filter').onClick(() => this.openFilters()));
+      menu.addItem(item => item.setTitle('复制全部筛选结果').setIcon('copy').onClick(() => { void this.action(() => this.copyResults(false)); }));
+      menu.addItem(item => item.setTitle('复制全部筛选结果（含来源链接）').setIcon('link').onClick(() => { void this.action(() => this.copyResults(true)); }));
+      menu.addSeparator();
+      menu.addItem(item => item.setTitle('随机回顾').setIcon('shuffle').setDisabled(this.filter.feed === 'trash').onClick(() => {
         const memos = this.filteredMemos();
         if (!memos.length) { new Notice('当前筛选下还没有便签'); return; }
         new ReviewModal(this.app, this.controller, memos, memo => this.edit(memo)).open();
@@ -321,28 +304,40 @@ export class MemoView extends ItemView {
       this.updateSidebarVisibility();
     };
     this.filterRow = controls.createDiv({ cls: 'st-active-filters' });
-    this.dateInput = this.filterRow.createEl('input', { type: 'date', attr: { 'aria-label': '选择筛选日期' } });
-    this.dateInput.onchange = () => this.setDate(this.dateInput.value);
-    this.tagFilter = button(this.filterRow, '', 'x', 'st-filter-chip');
-    this.tagFilter.onclick = () => { this.tag = ''; this.limit = 50; this.update(); };
-    const clear = button(this.filterRow, '清除筛选', undefined, 'st-clear-filters');
-    clear.onclick = () => {
-      this.date = ''; this.tag = ''; this.datePickerOpen = false;
-      this.limit = 50; this.update();
-    };
+  }
+
+  private openFilters(): void {
+    new FilterModal(this.app, this.controller, validateFilter(this.filter), (filter, id) => this.applyFilter(filter, id), this.activeFilterId).open();
+  }
+
+  private applyFilter(filter: MemoFilter, id = ''): void {
+    this.filter = validateFilter(filter); this.activeFilterId = id; this.limit = 50;
+    this.searchInput.value = this.filter.text;
+    this.update();
+  }
+
+  private hasFilters(): boolean {
+    return Boolean(this.filter.text || this.filter.tags.length || this.filter.period !== 'all' || this.filter.status !== 'any');
   }
 
   private updateFilters(): void {
-    this.feedSelect.value = this.feed;
-    this.filterRow.hidden = !this.datePickerOpen && !this.date && !this.tag;
-    this.dateInput.hidden = !this.datePickerOpen && !this.date;
-    this.dateInput.value = this.date;
-    this.tagFilter.hidden = !this.tag;
-    this.tagFilter.querySelector('span:last-child')?.setText(`#${this.tag}`);
-    this.tagFilter.setAttribute('aria-label', `取消标签筛选 #${this.tag}`);
-    this.tagFilter.title = `取消标签筛选 #${this.tag}`;
-    this.dateButton.toggleClass('is-active', Boolean(this.date) || this.datePickerOpen);
-    this.dateButton.setAttribute('aria-expanded', String(this.datePickerOpen || Boolean(this.date)));
+    this.feedSelect.value = this.filter.feed;
+    this.filterRow.empty();
+    this.filterRow.hidden = !this.hasFilters();
+    const chip = (label: string, clear: () => void) => {
+      const el = button(this.filterRow, label, 'x', 'st-filter-chip');
+      el.title = `取消筛选：${label}`;
+      el.onclick = () => { clear(); this.activeFilterId = ''; this.limit = 50; this.update(); };
+    };
+    if (this.filter.period !== 'all') {
+      const label = this.filter.period === 'custom' ? `${this.filter.from || '不限'} ～ ${this.filter.to || '不限'}` : PERIOD_LABELS[this.filter.period];
+      chip(label, () => { this.filter.period = 'all'; this.filter.from = ''; this.filter.to = ''; });
+    }
+    for (const tag of this.filter.tags) chip(`#${tag}`, () => { this.filter.tags = this.filter.tags.filter(value => value !== tag); });
+    if (this.filter.status !== 'any') chip(STATUS_LABELS[this.filter.status], () => { this.filter.status = 'any'; });
+    const clear = button(this.filterRow, '清除筛选', undefined, 'st-clear-filters');
+    clear.onclick = () => this.applyFilter({ ...emptyFilter(), oldestFirst: this.filter.oldestFirst });
+    this.dateButton.toggleClass('is-active', this.hasFilters());
   }
 
   private update(): void {
@@ -372,35 +367,21 @@ export class MemoView extends ItemView {
     this.contentEl.toggleClass('st-has-sidebar', this.showSidebar);
   }
 
-  private matches(memo: Memo): boolean {
-    if (this.date && memo.date !== this.date) return false;
-    if (this.tag && !memo.tags.some(tag => normalizeTag(tag) === this.tag || normalizeTag(tag).startsWith(`${this.tag}/`))) return false;
-    const text = memo.content.toLocaleLowerCase();
-    const terms = this.search.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
-    return terms.every(term => term.startsWith('#')
-      ? memo.tags.some(tag => normalizeTag(tag).toLocaleLowerCase().startsWith(term.slice(1)))
-      : text.includes(term));
+  private matchingTrash(): TrashEntry[] {
+    const bounds = dateBounds(this.filter, new Date(), this.controller.settings.weekStart);
+    return this.controller.data.trash.filter(entry => matchesMemo(entry.memo, this.filter, bounds))
+      .sort((a, b) => this.filter.oldestFirst ? a.deletedAt.localeCompare(b.deletedAt) : b.deletedAt.localeCompare(a.deletedAt));
   }
 
   private filteredMemos(): Memo[] {
-    const today = localDate();
-    const memos = this.controller.list().filter(memo => {
-      const meta = this.controller.data.meta[memo.key] ?? {};
-      if ((this.feed === 'archived') !== Boolean(meta.archived)) return false;
-      if (this.feed === 'today' && memo.date !== today) return false;
-      if (this.feed === 'tasks' && !memo.task) return false;
-      if (this.feed === 'pinned' && !meta.pinned) return false;
-      if (this.controller.settings.hideDone && memo.task === 'done') return false;
-      return this.matches(memo);
-    });
-    return memos.sort((a, b) => {
-      if (this.feed === 'all') {
-        const pinned = Number(Boolean(this.controller.data.meta[b.key]?.pinned)) - Number(Boolean(this.controller.data.meta[a.key]?.pinned));
-        if (pinned) return pinned;
-      }
-      const order = `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`) || a.path.localeCompare(b.path) || a.line - b.line;
-      return this.oldestFirst ? order : -order;
-    });
+    return filterMemos(this.controller.list(), this.filter, this.controller.data.meta, this.controller.settings);
+  }
+
+  private async copyResults(includeLinks: boolean): Promise<void> {
+    const memos = this.filter.feed === 'trash' ? this.matchingTrash().map(entry => entry.memo) : this.filteredMemos();
+    if (!memos.length) { new Notice('当前筛选下没有可复制的便签'); return; }
+    await navigator.clipboard.writeText(memosToMarkdown(memos, includeLinks));
+    new Notice(`已按日期复制 ${memos.length} 条便签${includeLinks ? '（含来源链接）' : ''}`);
   }
 
   private clearRendering(): void {
@@ -418,9 +399,9 @@ export class MemoView extends ItemView {
   private renderResults(): void {
     this.clearRendering();
     this.listEl.empty();
-    const trash = this.feed === 'trash';
+    const trash = this.filter.feed === 'trash';
     const entries = trash
-      ? this.controller.data.trash.filter(entry => this.matches(entry.memo)).sort((a, b) => this.oldestFirst ? a.deletedAt.localeCompare(b.deletedAt) : b.deletedAt.localeCompare(a.deletedAt))
+      ? this.matchingTrash()
       : [];
     const memos = trash ? entries.map(entry => entry.memo) : this.filteredMemos();
     this.resultCount.setText(String(memos.length));
@@ -431,9 +412,9 @@ export class MemoView extends ItemView {
     if (!memos.length) {
       const empty = this.listEl.createDiv({ cls: 'st-empty' });
       const icon = empty.createDiv({ cls: 'st-empty-icon' });
-      setIcon(icon, this.search || this.date || this.tag ? 'search' : 'feather');
-      empty.createEl('h3', { text: this.search || this.date || this.tag ? '没有找到匹配的便签' : this.feed === 'trash' ? '回收站是空的' : '给今天留下一点记录' });
-      empty.createEl('p', { text: this.search || this.date || this.tag ? '试试其他关键词，或清除日期和标签筛选。' : this.feed === 'all' || this.feed === 'today' ? '写下一句话，就从这里开始。' : '符合当前分类的便签会出现在这里。' });
+      setIcon(icon, this.hasFilters() ? 'search' : 'feather');
+      empty.createEl('h3', { text: this.hasFilters() ? '没有找到匹配的便签' : this.filter.feed === 'trash' ? '回收站是空的' : '给今天留下一点记录' });
+      empty.createEl('p', { text: this.hasFilters() ? '试试其他关键词，或清除日期和标签筛选。' : this.filter.feed === 'all' || this.filter.feed === 'today' ? '写下一句话，就从这里开始。' : '符合当前分类的便签会出现在这里。' });
       return;
     }
     memos.slice(0, this.limit).forEach((memo, index) => this.renderMemo(memo, trash ? entries[index] : undefined));
@@ -497,7 +478,8 @@ export class MemoView extends ItemView {
         event.preventDefault();
         event.stopPropagation();
         if (hasSelectionWithin(content)) return;
-        this.tag = normalizeTag(tag.textContent?.trim() ?? '');
+        this.filter.tags = [normalizeTag(tag.textContent?.trim() ?? '')];
+        this.activeFilterId = '';
         this.limit = 50;
         this.update();
       }
@@ -531,13 +513,15 @@ export class MemoView extends ItemView {
     menu.showAtMouseEvent(event);
   }
 
+  private get selectedDate(): string { return this.filter.period === 'custom' && this.filter.from === this.filter.to ? this.filter.from : ''; }
+
   private setDate(date: string): void {
-    this.date = date;
-    this.dateInput.value = date;
+    this.filter.period = date ? 'custom' : 'all';
+    this.filter.from = date; this.filter.to = date; this.activeFilterId = '';
     if (date) {
       const [year, month] = date.split('-').map(Number);
       this.calendarMonth = new Date(year, month - 1, 1);
-      if (this.feed === 'today') this.feed = 'all';
+      if (this.filter.feed === 'today') this.filter.feed = 'all';
     }
     this.limit = 50;
     this.update();
@@ -545,6 +529,16 @@ export class MemoView extends ItemView {
 
   private renderSidebar(): void {
     this.sidebar.empty();
+    const presets = this.controller.data.savedFilters ?? [];
+    if (presets.length) {
+      const section = this.sidebar.createDiv({ cls: 'st-saved-filters' });
+      section.createEl('h3', { text: '已保存的筛选' });
+      for (const preset of presets) {
+        const entry = button(section, preset.name, 'list-filter', 'st-tag-row');
+        entry.toggleClass('is-active', preset.id === this.activeFilterId);
+        entry.onclick = () => this.applyFilter(preset.filter, preset.id);
+      }
+    }
     const memos = this.controller.list();
     const counts = new Map<string, number>();
     memos.forEach(memo => counts.set(memo.date, (counts.get(memo.date) ?? 0) + 1));
@@ -577,9 +571,9 @@ export class MemoView extends ItemView {
     Array.from(tagCounts.entries()).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).forEach(([tag, count]) => {
       const row = button(tags, `#${tag}`, undefined, 'st-tag-row');
       row.createSpan({ cls: 'st-tag-count', text: String(count) });
-      row.toggleClass('is-active', this.tag === tag);
-      row.setAttribute('aria-pressed', String(this.tag === tag));
-      row.onclick = () => { this.tag = this.tag === tag ? '' : tag; this.limit = 50; this.update(); };
+      row.toggleClass('is-active', this.filter.tags.includes(tag));
+      row.setAttribute('aria-pressed', String(this.filter.tags.includes(tag)));
+      row.onclick = () => { this.filter.tags = this.filter.tags.includes(tag) ? this.filter.tags.filter(value => value !== tag) : [...this.filter.tags, tag]; this.activeFilterId = ''; this.limit = 50; this.update(); };
     });
   }
 
@@ -598,11 +592,11 @@ export class MemoView extends ItemView {
       const cell = button(grid, String(day), undefined, 'st-calendar-day');
       cell.title = `${date} · ${count} 条记录`;
       cell.setAttribute('aria-label', cell.title);
-      cell.setAttribute('aria-pressed', String(this.date === date));
+      cell.setAttribute('aria-pressed', String(this.selectedDate === date));
       cell.toggleClass('has-memos', count > 0);
       cell.toggleClass('is-today', date === today);
-      cell.toggleClass('is-selected', date === this.date);
-      cell.onclick = () => this.setDate(this.date === date ? '' : date);
+      cell.toggleClass('is-selected', date === this.selectedDate);
+      cell.onclick = () => this.setDate(this.selectedDate === date ? '' : date);
     }
   }
 
@@ -615,8 +609,8 @@ export class MemoView extends ItemView {
       const count = counts.get(date) ?? 0;
       const cell = button(heatmap, `${date} · ${count} 条`, undefined, 'st-heat-cell st-icon-button');
       cell.dataset.level = String(Math.min(count, 4));
-      cell.toggleClass('is-selected', date === this.date);
-      cell.onclick = () => this.setDate(this.date === date ? '' : date);
+      cell.toggleClass('is-selected', date === this.selectedDate);
+      cell.onclick = () => this.setDate(this.selectedDate === date ? '' : date);
     }
     const legend = activity.createDiv({ cls: 'st-heat-legend' });
     legend.createSpan({ text: '少' });
@@ -632,6 +626,7 @@ class EditMemoModal extends Modal {
   private readonly controller: MemoController;
   private readonly memo: Memo;
   private saving = false;
+  private clearSuggestions?: () => void;
   constructor(app: App, controller: MemoController, memo: Memo) {
     super(app);
     this.controller = controller;
@@ -643,6 +638,7 @@ class EditMemoModal extends Modal {
     this.contentEl.createEl('p', { cls: 'st-muted', text: `${this.memo.date} ${this.memo.time} · ${this.memo.path}` });
     const editor = this.contentEl.createEl('textarea', { cls: 'st-modal-editor', attr: { 'aria-label': '编辑便签正文', rows: '12' } });
     editor.value = this.memo.content;
+    this.clearSuggestions = attachSuggestions(this.app, this.controller, editor, this.scope);
     const error = this.contentEl.createDiv({ cls: 'st-inline-error', attr: { role: 'alert' } });
     const actions = this.contentEl.createDiv({ cls: 'st-modal-actions' });
     const cancel = button(actions, '取消');
@@ -679,7 +675,7 @@ class EditMemoModal extends Modal {
     editor.focus();
     editor.setSelectionRange(editor.value.length, editor.value.length);
   }
-  onClose(): void { this.contentEl.empty(); }
+  onClose(): void { this.clearSuggestions?.(); this.contentEl.empty(); }
 }
 
 class DeleteMemoModal extends Modal {

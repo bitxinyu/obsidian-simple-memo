@@ -1,10 +1,12 @@
 import { App, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, normalizePath, moment as obsidianMoment } from 'obsidian';
 import type momentType from 'moment';
 const moment = obsidianMoment as unknown as typeof momentType;
-import type { Memo, MemoController, MemoMeta, PluginData, Settings } from './types';
+import type { Memo, MemoController, MemoFilter, MemoMeta, PluginData, Settings } from './types';
 import { asRecord, defaultSettings, importThinoSettings, safePath, validateSettings } from './settings';
 import { parseMemos, formatMemo, insertMemo, replaceMemo, editMemoRaw, toggleMemoRaw, getMemoFields, transformMemoFields, withMemoBlockId } from './core';
 import { MemoView, VIEW_TYPE, addIndentAction, registerSaveShortcut } from './view';
+import { memoLink, readSavedFilters, validateFilter } from './filters';
+import { attachSuggestions } from './suggest';
 const deleted = (raw: string) => [...getMemoFields(raw).join(' ').matchAll(/\[deleted::([^\]]+)\]/gi)].some(m => !['', 'false', '0'].includes(m[1].trim().toLowerCase()));
 const legacyMeta = (raw: string): MemoMeta => ({ pinned: /\[pinned::\s*true\s*\]/i.test(getMemoFields(raw).join(' ')), archived: /\[archived::\s*true\s*\]/i.test(getMemoFields(raw).join(' ')) });
 const uid = () => `st-${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
@@ -43,6 +45,7 @@ export default class SimpleMemoPlugin extends Plugin implements MemoController {
             this.data = { version: 1, settings: imported?.settings ?? { ...defaultSettings }, imported: imported?.report, meta: {}, trash: [], draft: '' };
             await this.persist();
         }
+        if (this.data.savedFilters !== undefined) this.data.savedFilters = readSavedFilters(this.data.savedFilters);
         this.settings = this.data.settings;
         this.registerView(VIEW_TYPE, leaf => new MemoView(leaf, this));
         this.addRibbonIcon('notebook-pen', 'Simple Memo', () => void this.openView());
@@ -78,6 +81,30 @@ export default class SimpleMemoPlugin extends Plugin implements MemoController {
     persist() { const snapshot = JSON.parse(JSON.stringify(this.data)) as PluginData; const saving = this.saveQueue.then(() => this.saveData(snapshot)); this.saveQueue = saving.catch(() => { }); return saving; }
     private serial<T>(action: () => Promise<T>): Promise<T> { const next = this.operationQueue.then(action); this.operationQueue = next.catch(() => { }); return next; }
     list() { return this.memos; }
+    saveFilter(name: string, filter: MemoFilter, id?: string): Promise<string> {
+        const cleanName = name.trim();
+        const conditions = validateFilter(filter);
+        return this.serial(async () => {
+            if (!cleanName) throw new Error('请为筛选命名');
+            const previous = this.data.savedFilters;
+            const entries = previous ?? [];
+            if (id && !entries.some(entry => entry.id === id)) throw new Error('该筛选已被删除，请重新打开筛选窗口');
+            if (entries.some(entry => entry.name === cleanName && entry.id !== id)) throw new Error('已存在同名筛选，请选择它后更新，或使用其他名称');
+            const entry = { id: id ?? uid(), name: cleanName, filter: conditions };
+            this.data.savedFilters = id ? entries.map(value => value.id === id ? entry : value) : [...entries, entry];
+            try { await this.persist(); } catch (error) { this.data.savedFilters = previous; throw error; }
+            this.emit();
+            return entry.id;
+        });
+    }
+    deleteFilter(id: string): Promise<void> {
+        return this.serial(async () => {
+            const previous = this.data.savedFilters;
+            this.data.savedFilters = (previous ?? []).filter(entry => entry.id !== id);
+            try { await this.persist(); } catch (error) { this.data.savedFilters = previous; throw error; }
+            this.emit();
+        });
+    }
     subscribe(callback: () => void) { this.listeners.add(callback); return () => this.listeners.delete(callback); }
     private emit() { for (const callback of this.listeners)
         callback(); }
@@ -285,7 +312,7 @@ export default class SimpleMemoPlugin extends Plugin implements MemoController {
     async openSource(memo: Memo) { const file = this.app.vault.getAbstractFileByPath(memo.path); if (!(file instanceof TFile))
         throw new Error('原文件不存在'); const leaf = this.app.workspace.getLeaf('tab'); await leaf.openFile(file, { eState: { line: Math.max(0, memo.line - 1) } }); if (leaf.view instanceof MarkdownView)
         leaf.view.editor.setCursor({ line: Math.max(0, memo.line - 1), ch: 0 }); }
-    async copyLink(memo: Memo) { const link = memo.blockId ? `[[${memo.path.replace(/\.md$/, '')}#^${memo.blockId}]]` : `[[${memo.path.replace(/\.md$/, '')}]]`; await navigator.clipboard.writeText(link); new Notice(memo.blockId ? '已复制块引用' : '已复制原日记链接（此便签无块 ID）'); }
+    async copyLink(memo: Memo) { await navigator.clipboard.writeText(memoLink(memo)); new Notice(memo.blockId ? '已复制块引用' : '已复制原日记链接（此便签无块 ID）'); }
     // eslint-disable-next-line no-control-regex -- Strip control characters from attachment file names.
     async attach(file: File) { const name = file.name.replace(/[\\/:*?"<>|[\]#^\x00-\x1f]/g, '-') || 'attachment'; const path = normalizePath(`附件/${Date.now()}-${uid()}-${name}`); await this.ensureFolder(path); const created = await this.app.vault.createBinary(path, await file.arrayBuffer()); return `${file.type.startsWith('image/') ? '!' : ''}[[${created.path}]]`; }
     saveQuickDraft(text: string) { this.data.quickDraft = text; window.clearTimeout(this.draftTimer); this.draftTimer = window.setTimeout(() => void this.persist().catch(e => this.notifyError(e)), 400); }
@@ -300,11 +327,13 @@ export default class SimpleMemoPlugin extends Plugin implements MemoController {
     } await this.app.workspace.revealLeaf(leaf); }
 }
 class CaptureModal extends Modal {
+    private clearSuggestions?: () => void;
     constructor(app: App, private plugin: SimpleMemoPlugin) { super(app); }
     onOpen() {
         this.titleEl.setText('随手记');
         const textarea = this.contentEl.createEl('textarea', { cls: 'st-quick-capture', attr: { placeholder: '记录此刻的想法…', rows: '7' } });
         textarea.value = this.plugin.data.quickDraft ?? '';
+        this.clearSuggestions = attachSuggestions(this.app, this.plugin, textarea, this.scope);
         textarea.addEventListener('input', () => this.plugin.saveQuickDraft(textarea.value));
         let task = this.plugin.settings.defaultTask;
         let busy = false;
@@ -330,7 +359,7 @@ class CaptureModal extends Modal {
         registerSaveShortcut(this.scope, textarea, () => { void save(); });
         window.setTimeout(() => textarea.focus(), 50);
     }
-    onClose() { this.contentEl.empty(); }
+    onClose() { this.clearSuggestions?.(); this.contentEl.empty(); }
 }
 class MemoSettingsTab extends PluginSettingTab {
     private renderId = 0;
