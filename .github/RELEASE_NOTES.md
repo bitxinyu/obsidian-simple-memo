@@ -1,4 +1,4 @@
-Simple Memo 1.1.0
+Simple Memo 1.0.9
 
 - Tag and note-link completion.
 - Saved combined filters with date ranges.
