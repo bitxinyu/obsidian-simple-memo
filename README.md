@@ -2,7 +2,7 @@
 
 [简体中文](README.zh-CN.md)
 
-Local memos for Obsidian, stored in your daily Markdown notes. No account or subscription required.
+Local memos for Obsidian, stored in Markdown. No account or subscription required.
 
 ![Simple Memo with example notes](docs/screenshots/simple-memo.png)
 
@@ -30,15 +30,15 @@ Open Simple Memo from the ribbon icon or the command palette. Write a memo and c
 
 Use the toolbar to search and filter. Each memo's **…** menu includes editing, copying, pinning, archiving, and deletion. Deleted memos can be restored from the recycle bin.
 
-New installations save daily notes in `Journal`. To use existing notes, set the daily-note folder and filename format in **Settings → Simple Memo**. The interface is currently in Simplified Chinese.
+In **Settings → Simple Memo**, choose daily notes (default), one shared file, or one file per memo. The default locations are `Journal/`, `memo.md`, and `Memo/` respectively. The interface is currently in Simplified Chinese.
 
 ## Thino compatibility
 
-Simple Memo reads Thino-style daily memos, including pinned and archived states. On first use, it imports supported Thino settings when they are present. Only daily-note sources are supported. This is an independent implementation, unaffiliated with Thino.
+New memos use `[!memo]` and `memoType` by default. Existing Thino memos keep their original format when edited. To share new memos with Thino, import its storage locations in settings.
 
 ## Data and compatibility
 
-Memo text stays in your daily notes. Drafts, recycle-bin entries, and saved filters are stored in `.obsidian/plugins/simple-memo/data.json`; include that file in backups. Attachments are saved in the vault's `附件` folder.
+Memo text stays in your Markdown files. Drafts, recycle-bin entries, and saved filters are stored in `.obsidian/plugins/simple-memo/data.json`; include that file in backups. Attachments are saved in the vault's `附件` folder.
 
 The plugin does not make its own network requests or provide a sync service. Existing vault sync continues to handle your files. External images in memo content may load through Obsidian's Markdown renderer.
 

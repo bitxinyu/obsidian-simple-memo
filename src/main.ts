@@ -1,19 +1,22 @@
 import { App, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, normalizePath, moment as obsidianMoment } from 'obsidian';
 import type momentType from 'moment';
 const moment = obsidianMoment as unknown as typeof momentType;
-import type { Memo, MemoController, MemoFilter, MemoMeta, PluginData, Settings } from './types';
+import type { Memo, MemoController, MemoFilter, MemoMeta, PluginData, Settings, TrashEntry } from './types';
 import { asRecord, defaultSettings, importThinoSettings, safePath, validateSettings } from './settings';
 import { parseMemos, formatMemo, insertMemo, replaceMemo, editMemoRaw, toggleMemoRaw, getMemoFields, transformMemoFields, withMemoBlockId } from './core';
 import { MemoView, VIEW_TYPE, addIndentAction, registerSaveShortcut } from './view';
 import { memoLink, readSavedFilters, validateFilter } from './filters';
 import { attachSuggestions } from './suggest';
+import { appendSingleFile, changeStoredMemo, newMultiFile, readMultiFile, readSingleFile, storageTime } from './memo-storage';
 const deleted = (raw: string) => [...getMemoFields(raw).join(' ').matchAll(/\[deleted::([^\]]+)\]/gi)].some(m => !['', 'false', '0'].includes(m[1].trim().toLowerCase()));
 const legacyMeta = (raw: string): MemoMeta => ({ pinned: /\[pinned::\s*true\s*\]/i.test(getMemoFields(raw).join(' ')), archived: /\[archived::\s*true\s*\]/i.test(getMemoFields(raw).join(' ')) });
-const uid = () => `st-${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
+const memoId = () => crypto.randomUUID().replace(/-/g, '').slice(0, 16);
+const uid = () => `st-${memoId()}`;
 export default class SimpleMemoPlugin extends Plugin implements MemoController {
     data!: PluginData;
     settings!: Settings;
     private memos: Memo[] = [];
+    private sourceTrash: TrashEntry[] = [];
     private listeners = new Set<() => void>();
     private saveQueue: Promise<void> = Promise.resolve();
     private operationQueue: Promise<unknown> = Promise.resolve();
@@ -42,7 +45,8 @@ export default class SimpleMemoPlugin extends Plugin implements MemoController {
         }
         else {
             const imported = await this.readThino();
-            this.data = { version: 1, settings: imported?.settings ?? { ...defaultSettings }, imported: imported?.report, meta: {}, trash: [], draft: '' };
+            const settings = { ...defaultSettings, ...imported?.settings, singleFile: defaultSettings.singleFile, multiFolder: defaultSettings.multiFolder };
+            this.data = { version: 1, settings, imported: imported?.report, meta: {}, trash: [], draft: '' };
             await this.persist();
         }
         if (this.data.savedFilters !== undefined) this.data.savedFilters = readSavedFilters(this.data.savedFilters);
@@ -81,6 +85,7 @@ export default class SimpleMemoPlugin extends Plugin implements MemoController {
     persist() { const snapshot = JSON.parse(JSON.stringify(this.data)) as PluginData; const saving = this.saveQueue.then(() => this.saveData(snapshot)); this.saveQueue = saving.catch(() => { }); return saving; }
     private serial<T>(action: () => Promise<T>): Promise<T> { const next = this.operationQueue.then(action); this.operationQueue = next.catch(() => { }); return next; }
     list() { return this.memos; }
+    listTrash() { return [...this.data.trash, ...this.sourceTrash]; }
     saveFilter(name: string, filter: MemoFilter, id?: string): Promise<string> {
         const cleanName = name.trim();
         const conditions = validateFilter(filter);
@@ -117,21 +122,53 @@ export default class SimpleMemoPlugin extends Plugin implements MemoController {
         const date = moment(name, this.settings.dateFormat, true);
         return date.isValid() && date.format(this.settings.dateFormat) === name ? date.format('YYYY-MM-DD') : null;
     }
+    private isSingleFile(path: string) {
+        return path === this.settings.singleFile || path === defaultSettings.singleFile || path.endsWith('.memo.md')
+            || path === this.data.imported?.storagePaths?.singleFile || path.endsWith('.thino.md');
+    }
+    private inThinoFolder(path: string) {
+        return path.startsWith((this.data.imported?.storagePaths?.multiFolder ?? 'Thino') + '/');
+    }
+    private isMultiFile(path: string) {
+        return path.startsWith(this.settings.multiFolder + '/') || path.startsWith(defaultSettings.multiFolder + '/') || this.inThinoFolder(path);
+    }
     async refresh() {
         const generation = ++this.generation;
         const entries: Memo[] = [];
-        const files = this.app.vault.getMarkdownFiles().filter(f => this.dateFor(f.path));
+        const files = this.app.vault.getMarkdownFiles().filter(f => this.isSingleFile(f.path) || this.isMultiFile(f.path) || this.dateFor(f.path));
         // Bound concurrency: large iCloud vaults should not get hundreds of simultaneous reads.
         for (let start = 0; start < files.length; start += 16) {
-            const batch = await Promise.all(files.slice(start, start + 16).map(async (file) => parseMemos(await this.app.vault.cachedRead(file), file.path, this.dateFor(file.path)!, this.settings)));
+            const batch = await Promise.all(files.slice(start, start + 16).map(async file => {
+                const source = await this.app.vault.cachedRead(file);
+                const date = this.dateFor(file.path);
+                if (this.isSingleFile(file.path)) {
+                    const cards = readSingleFile(source, file.path);
+                    return date ? cards.concat(parseMemos(source, file.path, date, this.settings)) : cards;
+                }
+                if (this.isMultiFile(file.path)) {
+                    const cards = readMultiFile(source, file.path, date ? undefined : moment(file.stat.ctime).format(storageTime));
+                    if (!date || cards[0]?.storage?.id) return cards;
+                }
+                if (date) return parseMemos(source, file.path, date, this.settings);
+                return [];
+            }));
             for (const group of batch)
                 entries.push(...group);
         }
         if (generation !== this.generation || this.stopped)
             return;
-        this.memos = entries.filter(m => !deleted(m.raw)).sort((a, b) => `${b.date} ${b.time}`.localeCompare(`${a.date} ${a.time}`) || b.line - a.line);
-        for (const memo of this.memos)
-            this.data.meta[memo.key] = legacyMeta(memo.raw);
+        this.sourceTrash = [];
+        this.memos = entries.filter(memo => {
+            const storage = memo.storage;
+            if (!storage) return !deleted(memo.raw);
+            if (!storage.deletedAt) return true;
+            const date = moment(storage.deletedAt, [storageTime, 'YYYYMMDDHHmmss'], true);
+            this.sourceTrash.push({ id: memo.key, memo, deletedAt: date.isValid() ? date.toISOString() : storage.deletedAt,
+                meta: { pinned: storage.pinned, archived: storage.archived } });
+            return false;
+        }).sort((a, b) => `${b.date} ${b.time}`.localeCompare(`${a.date} ${a.time}`) || b.line - a.line);
+        for (const memo of this.memos) this.data.meta[memo.key] = memo.storage
+            ? { pinned: memo.storage.pinned, archived: memo.storage.archived } : legacyMeta(memo.raw);
         this.emit();
     }
     private async ensureFolder(path: string) {
@@ -152,7 +189,7 @@ export default class SimpleMemoPlugin extends Plugin implements MemoController {
             }
         }
     }
-    private async ensureFile(path: string, date = moment()): Promise<TFile> {
+    private async ensureFile(path: string, date?: momentType.Moment): Promise<TFile> {
         safePath(path);
         const found = this.app.vault.getAbstractFileByPath(path);
         if (found instanceof TFile)
@@ -161,7 +198,7 @@ export default class SimpleMemoPlugin extends Plugin implements MemoController {
             throw new Error('保存路径被文件夹占用');
         await this.ensureFolder(path);
         let content = '';
-        if (this.settings.template) {
+        if (date && this.settings.template) {
             const t = this.app.vault.getAbstractFileByPath(this.settings.template.endsWith('.md') ? this.settings.template : `${this.settings.template}.md`);
             if (!(t instanceof TFile))
                 throw new Error('找不到日记模板，请检查 Simple Memo 设置');
@@ -183,20 +220,43 @@ export default class SimpleMemoPlugin extends Plugin implements MemoController {
                 throw new Error('请输入便签内容');
             const settings = validateSettings(this.settings);
             const now = moment();
-            const path = normalizePath([settings.folder, `${now.format(settings.dateFormat)}.md`].filter(Boolean).join('/'));
             let body = `${settings.fixedPrefix}${content}${settings.fixedSuffix}`;
             if (settings.defaultTag.trim())
                 body += `\n\n${settings.defaultTag.trim().split(/\s+/).map(t => t.startsWith('#') ? t : `#${t}`).join(' ')}`;
-            const raw = withMemoBlockId(formatMemo(body, now.format(settings.timeFormat), task, settings), uid());
-            const file = await this.ensureFile(path, now);
-            await this.app.vault.process(file, source => insertMemo(source, raw, settings.insertHeading));
+            if (settings.storageMode === 'multi') {
+                const id = memoId();
+                const path = `${settings.multiFolder}/${now.format('YYYYMMDD')}-${id}.md`;
+                await this.ensureFolder(path);
+                const legacyFolder = settings.multiFolder !== defaultSettings.multiFolder && this.inThinoFolder(path);
+                await this.app.vault.create(path, newMultiFile(body, task, id, now.format(storageTime), legacyFolder));
+            } else if (settings.storageMode === 'file') {
+                if (this.dateFor(settings.singleFile)) throw new Error('单文件路径与日记路径重叠，请选择独立文件。');
+                const file = await this.ensureFile(settings.singleFile);
+                const id = memoId();
+                const path = settings.singleFile;
+                const legacyPath = path.endsWith('.thino.md') || (path !== defaultSettings.singleFile && path === this.data.imported?.storagePaths?.singleFile);
+                await this.app.vault.process(file, source => appendSingleFile(source, path, body, task, id, now.format(storageTime), legacyPath));
+            } else {
+                const path = normalizePath([settings.folder, `${now.format(settings.dateFormat)}.md`].filter(Boolean).join('/'));
+                if (this.isSingleFile(path)) throw new Error('日记路径与单文件路径重叠，请检查设置。');
+                const raw = withMemoBlockId(formatMemo(body, now.format(settings.timeFormat), task, settings), uid());
+                const file = await this.ensureFile(path, now);
+                await this.app.vault.process(file, source => {
+                    this.checkDailyTarget(path, source);
+                    return insertMemo(source, raw, settings.insertHeading);
+                });
+            }
             await this.refreshAfterWrite();
         });
+    }
+    private checkDailyTarget(path: string, source: string) {
+        if (this.isMultiFile(path) && readMultiFile(source, path)[0]?.storage?.id)
+            throw new Error('日记路径被多文件便签占用，请检查目录设置。');
     }
     private async changeRaw(memo: Memo, raw: string | null) {
         const file = this.app.vault.getAbstractFileByPath(memo.path);
         if (!(file instanceof TFile))
-            throw new Error('原日记已移动或删除，请刷新后重试');
+            throw new Error('原笔记已移动或删除，请刷新后重试');
         await this.app.vault.process(file, source => replaceMemo(source, memo, raw));
         await this.refreshAfterWrite();
     }
@@ -206,11 +266,35 @@ export default class SimpleMemoPlugin extends Plugin implements MemoController {
     catch (e) {
         this.notifyError(new Error('笔记已保存，但刷新失败，请稍后刷新：' + String(e)));
     } }
-    edit(memo: Memo, content: string) { return this.serial(async () => { if (!content.trim())
-        throw new Error('便签内容不能为空'); await this.changeRaw(memo, editMemoRaw(memo, content)); }); }
-    toggleTask(memo: Memo) { return this.serial(() => this.changeRaw(memo, toggleMemoRaw(memo, this.settings.appendCompletionDate ? moment().format('YYYY-MM-DD') : undefined))); }
+    private async updateStoredMemo(memo: Memo, change: Parameters<typeof changeStoredMemo>[2]) {
+        const file = this.app.vault.getAbstractFileByPath(memo.path);
+        if (!(file instanceof TFile)) throw new Error('原笔记已移动或删除，请刷新后重试');
+        const now = moment().format(storageTime);
+        await this.app.vault.process(file, source => changeStoredMemo(source, memo, change, now, memoId(), this.inThinoFolder(memo.path)));
+        await this.refreshAfterWrite();
+    }
+    edit(memo: Memo, content: string) {
+        return this.serial(async () => {
+            if (!content.trim()) throw new Error('便签内容不能为空');
+            if (memo.storage) return this.updateStoredMemo(memo, { content });
+            await this.changeRaw(memo, editMemoRaw(memo, content));
+        });
+    }
+    toggleTask(memo: Memo) {
+        return this.serial(async () => {
+            const date = this.settings.appendCompletionDate ? moment().format('YYYY-MM-DD') : undefined;
+            if (!memo.storage) return this.changeRaw(memo, toggleMemoRaw(memo, date));
+            const task = memo.task === 'done' ? 'open' : 'done';
+            let content = memo.content;
+            if (task === 'open') content = content.replace(/ ✅ \d{4}-\d{2}-\d{2}(\s*)$/, '$1');
+            else if (date && !/ ✅ \d{4}-\d{2}-\d{2}\s*$/.test(content))
+                content = content.replace(/(\s*)$/, ' ✅ ' + date + '$1');
+            await this.updateStoredMemo(memo, { task, content: content === memo.content ? undefined : content });
+        });
+    }
     setMeta(memo: Memo, patch: MemoMeta) {
         return this.serial(async () => {
+            if (memo.storage) return this.updateStoredMemo(memo, patch);
             let raw = editMemoRaw(memo, memo.content);
             for (const field of ['pinned', 'archived'] as const)
                 if (patch[field] !== undefined) {
@@ -223,6 +307,7 @@ export default class SimpleMemoPlugin extends Plugin implements MemoController {
     }
     remove(memo: Memo) {
         return this.serial(async () => {
+            if (memo.storage) return this.updateStoredMemo(memo, { deleted: true });
             const entry = { id: uid(), memo: { ...memo }, deletedAt: new Date().toISOString(), meta: { ...this.data.meta[memo.key] } };
             this.data.trash.push(entry);
             try {
@@ -245,11 +330,14 @@ export default class SimpleMemoPlugin extends Plugin implements MemoController {
     }
     restore(id: string) {
         return this.serial(async () => {
+            const sourceEntry = this.sourceTrash.find(t => t.id === id);
+            if (sourceEntry) return this.updateStoredMemo(sourceEntry.memo, { deleted: false });
             const entry = this.data.trash.find(t => t.id === id);
             if (!entry)
                 return;
             const file = await this.ensureFile(entry.memo.path, moment(entry.memo.date));
             await this.app.vault.process(file, source => {
+                this.checkDailyTarget(entry.memo.path, source);
                 if (parseMemos(source, entry.memo.path, entry.memo.date, this.settings).some(m => m.raw.replace(/\r\n|\r/g, '\n') === entry.memo.raw.replace(/\r\n|\r/g, '\n')))
                     return source;
                 if (entry.memo.blockId && new RegExp(`\\^${entry.memo.blockId}(?:\\s|$)`).test(source))
@@ -312,7 +400,7 @@ export default class SimpleMemoPlugin extends Plugin implements MemoController {
     async openSource(memo: Memo) { const file = this.app.vault.getAbstractFileByPath(memo.path); if (!(file instanceof TFile))
         throw new Error('原文件不存在'); const leaf = this.app.workspace.getLeaf('tab'); await leaf.openFile(file, { eState: { line: Math.max(0, memo.line - 1) } }); if (leaf.view instanceof MarkdownView)
         leaf.view.editor.setCursor({ line: Math.max(0, memo.line - 1), ch: 0 }); }
-    async copyLink(memo: Memo) { await navigator.clipboard.writeText(memoLink(memo)); new Notice(memo.blockId ? '已复制块引用' : '已复制原日记链接（此便签无块 ID）'); }
+    async copyLink(memo: Memo) { await navigator.clipboard.writeText(memoLink(memo)); new Notice(memo.blockId ? '已复制块引用' : '已复制原笔记链接'); }
     // eslint-disable-next-line no-control-regex -- Strip control characters from attachment file names.
     async attach(file: File) { const name = file.name.replace(/[\\/:*?"<>|[\]#^\x00-\x1f]/g, '-') || 'attachment'; const path = normalizePath(`附件/${Date.now()}-${uid()}-${name}`); await this.ensureFolder(path); const created = await this.app.vault.createBinary(path, await file.arrayBuffer()); return `${file.type.startsWith('image/') ? '!' : ''}[[${created.path}]]`; }
     saveQuickDraft(text: string) { this.data.quickDraft = text; window.clearTimeout(this.draftTimer); this.draftTimer = window.setTimeout(() => void this.persist().catch(e => this.notifyError(e)), 400); }
@@ -378,6 +466,11 @@ class MemoSettingsTab extends PluginSettingTab {
             this.plugin.notifyError(e);
         } };
         const text = (key: keyof Settings, name: string, desc: string) => new Setting(el).setName(name).setDesc(desc).addText(t => { t.setValue(String(this.plugin.settings[key])); t.inputEl.addEventListener('change', () => void save(key, t.getValue().trim())); });
+        new Setting(el).setName('新便签保存方式').setDesc('切换后，已有便签仍从原位置读取。')
+            .addDropdown(d => d.addOptions({ daily: '日记', file: '单文件', multi: '多文件（每条一篇）' })
+                .setValue(this.plugin.settings.storageMode).onChange(v => void save('storageMode', v)));
+        text('singleFile', '单文件路径', '默认 memo.md。向已有单文件追加时沿用其中的便签格式。');
+        text('multiFolder', '多文件目录', '此目录及子目录中的 Markdown 笔记按每篇一条便签读取。');
         text('folder', '日记目录', '笔记库内相对目录；留空表示根目录。');
         text('dateFormat', '日期格式', '例如 YYYY-MM-DD 或 YYYY/MM/DD。');
         text('template', '日记模板', '可选模板路径，支持 {{date}}、{{time}}、{{title}}。');

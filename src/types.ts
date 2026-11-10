@@ -1,4 +1,7 @@
 export interface Settings {
+    storageMode: 'daily' | 'file' | 'multi';
+    singleFile: string;
+    multiFolder: string;
     folder: string;
     dateFormat: string;
     timeFormat: string;
@@ -24,6 +27,14 @@ export interface Settings {
     fixedSuffix: string;
 }
 export interface Memo {
+    storage?: {
+        mode: 'file' | 'multi';
+        id: string;
+        createdAt: string;
+        deletedAt: string;
+        pinned: boolean;
+        archived: boolean;
+    };
     key: string;
     path: string;
     date: string;
@@ -49,6 +60,7 @@ export interface TrashEntry {
     legacy?: boolean;
 }
 export interface ImportReport {
+    storagePaths?: { singleFile: string; multiFolder: string };
     source: string;
     importedAt: string;
     mapped: string[];
@@ -85,6 +97,7 @@ export interface MemoController {
     settings: Settings;
     data: PluginData;
     list(): Memo[];
+    listTrash(): TrashEntry[];
     subscribe(callback: () => void): () => void;
     capture(content: string, task?: boolean): Promise<void>;
     edit(memo: Memo, content: string): Promise<void>;

@@ -42,7 +42,7 @@ const loadPlugin = (async () => {
 
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value));
 const journalPath = 'Journal/2026-10-22.md';
-type FakeFile = { __file: true; path: string; extension: string };
+type FakeFile = { __file: true; path: string; extension: string; stat: { ctime: number } };
 
 async function fixture(source = '') {
   const PluginClass = await loadPlugin;
@@ -53,7 +53,7 @@ async function fixture(source = '') {
     failRead: false, failProcess: false, failSave: false, processDelay: 0, activeProcesses: 0, maxProcesses: 0,
   };
   const addFile = (path: string, content: string) => {
-    const file: FakeFile = { __file: true, path, extension: 'md' };
+    const file: FakeFile = { __file: true, path, extension: 'md', stat: { ctime: new Date(2025, 0, 2, 3, 4, 5).valueOf() } };
     state.files.set(path, file); state.contents.set(path, content); return file;
   };
   if (source) addFile(journalPath, source);
@@ -371,4 +371,186 @@ test('concurrent preset saves retain all entries and reject duplicate names', as
   await assert.rejects(plugin.saveFilter('甲', emptyFilter()), /同名/);
   await assert.rejects(plugin.saveFilter('无效', emptyFilter(), 'deleted'), /已被删除/);
   assert.equal(plugin.data.savedFilters?.length, 2);
+});
+
+test('Thino single files round-trip in place and ignore callout examples in code fences', async () => {
+  const { plugin, state, vault } = await fixture('- 09:00 daily\n');
+  const path = 'Archive/basic.thino.md';
+  const header = '> [!thino] 2025/04/05 18:16:15 %% [id::abc123] [webId::keep] [thinoType::TASK-TODO] %%';
+  const prefix = '# 2025-04-05\r\n\r\n~~~md\r\n' + header + '\r\n> example\r\n~~~\r\n\r\n';
+  const suffix = '\r\n\r\n# After\r\nkeep\r\n';
+  await vault.create(path, prefix + header + '\r\n> first\r\n> \r\n> > quote' + suffix);
+  await plugin.refresh();
+  const memo = () => plugin.list().find(m => m.path === path)!;
+  assert.equal(plugin.list().length, 2);
+  assert.equal(memo().content, 'first\n\n> quote');
+  assert.equal(memo().date + ' ' + memo().time, '2025-04-05 18:16:15');
+  await plugin.edit(memo(), 'changed\n\n> quote\n#标签');
+  assert.deepEqual(memo().tags, ['标签']);
+  await plugin.toggleTask(memo());
+  await plugin.setMeta(memo(), { pinned: true, archived: true });
+  assert.equal(memo().task, 'done');
+  assert.deepEqual(plugin.data.meta[memo().key], { pinned: true, archived: true });
+  await plugin.remove(memo());
+  assert.equal(memo(), undefined);
+  assert.match(state.contents.get(path)!, /\[deleted::\d{14}\]/);
+  await plugin.restore(plugin.listTrash()[0].id);
+  assert.equal(plugin.listTrash().length, 0);
+  assert.equal(memo().content, 'changed\n\n> quote\n#标签');
+  assert.ok(state.contents.get(path)!.startsWith(prefix));
+  assert.ok(state.contents.get(path)!.endsWith(suffix));
+  assert.match(memo().raw, /\[webId::keep\]/);
+  const stale = memo();
+  state.contents.set(path, state.contents.get(path)!.replace('> changed', '> externally changed'));
+  await assert.rejects(plugin.edit(stale, 'would overwrite'), /修改/);
+  await plugin.refresh();
+  state.contents.set(path, state.contents.get(path)! + '\n' + header + '\n> duplicate id');
+  await assert.rejects(plugin.remove(memo()), /标识重复/);
+});
+
+test('multi-file metadata changes preserve unrelated YAML, Markdown and concurrent edits', async () => {
+  const { plugin, state, vault } = await fixture();
+  const path = 'Thino/sub/existing.md';
+  const extra = '# properties\r\ncustom: {original: "0001"}\r\ntags: [one, two]\r\n';
+  const original = '---\r\n' + extra + 'id: abc\r\ncreatedAt: 20250405181615\r\nupdatedAt: "2025/04/05 18:16:15" # keep comment\r\nthinoType: TASK-TODO\r\n---\r\n';
+  const body = '正文 #三\r\n\r\n---\r\n\r\n> end\r\n';
+  await vault.create(path, original + body);
+  await vault.create('Thino-unrelated/note.md', 'unrelated');
+  await plugin.refresh();
+  const memo = () => plugin.list()[0];
+  assert.equal(plugin.list().length, 1);
+  assert.equal(memo().date + ' ' + memo().time, '2025-04-05 18:16:15');
+  assert.deepEqual(memo().tags, ['三', 'one', 'two']);
+  await plugin.toggleTask(memo());
+  await plugin.setMeta(memo(), { pinned: true, archived: true });
+  await plugin.remove(memo());
+  assert.equal(plugin.list().length, 0);
+  await plugin.restore(plugin.listTrash()[0].id);
+  assert.equal(memo().task, 'done');
+  const raw = state.contents.get(path)!;
+  assert.ok(raw.startsWith('---\r\n' + extra));
+  assert.ok(raw.endsWith(body));
+  assert.match(raw, / # keep comment\r\n/);
+  assert.match(raw, /rowStatus: ARCHIVED/);
+  assert.match(raw, /thinoType: TASK-DONE/);
+  const stale = memo();
+  await plugin.edit(memo(), 'new content\n\n  code');
+  assert.equal(memo().content, 'new content\n\n  code');
+  await assert.rejects(plugin.remove(stale), /修改/);
+  assert.equal(memo().storage?.id, 'abc');
+});
+
+test('native storage uses memo markers, keeps all sources visible and preserves same-second memos', async () => {
+  const { plugin, state } = await fixture('- 09:00 daily\n');
+  assert.equal(plugin.settings.singleFile, 'memo.md');
+  assert.equal(plugin.settings.multiFolder, 'Memo');
+  plugin.settings.template = 'nonexistent-daily-template';
+  plugin.settings.storageMode = 'file';
+  await Promise.all([plugin.capture('first\n\n> quotation'), plugin.capture('second', true)]);
+  const file = state.contents.get(plugin.settings.singleFile)!;
+  assert.match(file, /^# \d{4}-\d\d-\d\d/);
+  assert.match(file, /> quotation\n\n> \[!memo\]/);
+  assert.doesNotMatch(file, /thino/i);
+  assert.match(file, /\[memoType::JOURNAL\]/);
+  assert.match(file, /\[memoType::TASK-TODO\]/);
+  assert.equal((file.match(/^# /gm) || []).length, 1);
+  plugin.settings.storageMode = 'multi';
+  await Promise.all([plugin.capture('third'), plugin.capture('fourth', true)]);
+  const multi = plugin.list().filter(m => m.storage?.mode === 'multi');
+  assert.equal(multi.length, 2);
+  for (const memo of multi) {
+    assert.doesNotMatch(memo.raw, /thino/i);
+    assert.match(memo.raw, /memoType: (?:TASK-TODO|JOURNAL)/);
+    assert.match(memo.path, /^Memo\/\d{8}-[\da-f]{16}\.md$/);
+    assert.match(memo.raw, /createdAt: \d{4}\/\d\d\/\d\d \d\d:\d\d:\d\d/);
+  }
+  plugin.settings.storageMode = 'daily';
+  await plugin.refresh();
+  assert.equal(plugin.list().length, 5);
+  assert.equal(new Set(plugin.list().map(m => m.key)).size, 5);
+});
+
+test('ordinary notes in the multi folder are indexed without a write and get an id on first edit', async () => {
+  const { plugin, state, vault } = await fixture();
+  const path = 'Thino/unprocessed.md';
+  await vault.create(path, 'raw body');
+  await plugin.refresh();
+  const [memo] = plugin.list();
+  assert.equal(memo.date, '2025-01-02');
+  assert.equal(state.contents.get(path), 'raw body');
+  await plugin.edit(memo, 'updated');
+  assert.match(state.contents.get(path)!, /id: ["']?[0-9a-f]{16}/);
+  assert.equal(plugin.list()[0].content, 'updated');
+  assert.equal(plugin.list()[0].storage?.createdAt, '2025/01/02 03:04:05');
+});
+
+test('date-named multi memos survive overlapping directories and daily writes refuse occupied paths', async () => {
+  const { plugin, state, vault } = await fixture();
+  plugin.settings.multiFolder = plugin.settings.folder;
+  const now = new Date();
+  const day = [now.getFullYear(), String(now.getMonth() + 1).padStart(2, '0'), String(now.getDate()).padStart(2, '0')].join('-');
+  const path = 'Journal/' + day + '.md';
+  const raw = '---\nid: dedicated\ncreatedAt: 2025/04/05 18:16:15\npinned:\n---\nbody';
+  await vault.create(path, raw);
+  await plugin.refresh();
+  assert.equal(plugin.list()[0].storage?.id, 'dedicated');
+  await assert.rejects(plugin.capture('must not append'), /占用/);
+  assert.equal(state.contents.get(path), raw);
+  await plugin.setMeta(plugin.list()[0], { pinned: true });
+  assert.equal(plugin.list()[0].storage?.pinned, true);
+  assert.equal(plugin.list()[0].content, 'body');
+});
+
+test('both callout formats can coexist and each task keeps its own marker and metadata', async () => {
+  const { plugin, state, vault } = await fixture();
+  const path = 'Collection/mixed.memo.md';
+  const stamp = '2026/11/01 09:10:11';
+  const source = '> [!thino] ' + stamp + ' %% [id::old] [thinoType::TASK-TODO] [webId::original] %%\n> old text\n> [!memo] literal example\n'
+    + '> [!memo] ' + stamp + ' %% [id::new] [memoType::TASK-TODO] %%\n> new text\n> [!thino] literal example';
+  await vault.create(path, source);
+  await plugin.refresh();
+  const find = (id: string) => plugin.list().find(m => m.storage?.id === id)!;
+  assert.equal(find('old').content, 'old text\n[!memo] literal example');
+  assert.equal(find('new').content, 'new text\n[!thino] literal example');
+  for (const id of ['old', 'new']) await plugin.toggleTask(find(id));
+  assert.match(find('old').raw, /\[thinoType::TASK-DONE\]/);
+  assert.match(find('old').raw, /\[webId::original\]/);
+  assert.match(find('new').raw, /\[memoType::TASK-DONE\]/);
+  plugin.settings.storageMode = 'file';
+  plugin.settings.singleFile = path;
+  await plugin.capture('new card');
+  assert.match(state.contents.get(path)!, /> \[!memo\] [^\n]+\[memoType::JOURNAL\] %%\n> new card/);
+});
+
+test('first install reads imported sources while new memos use native paths and fields', async () => {
+  const { createPlugin, state, vault } = await fixture();
+  const oldFile = 'Custom/shared.md', oldFolder = 'OldCards';
+  const config = { MemoSaveLocation: 'FILE', MemoOtherSaveLocation: { MemoDefaultSingleFilePath: oldFile, MemoDefaultMultiFilePath: oldFolder } };
+  state.contents.set('.obsidian/plugins/obsidian-memos/data.json', JSON.stringify(config));
+  const header = '> [!thino] 2025/04/05 18:16:15 %% [id::original] [thinoType::JOURNAL] %%\n> original';
+  await vault.create(oldFile, header);
+  await vault.create(oldFolder + '/one.md', '---\nid: old\ncreatedAt: 2025/04/05 18:16:15\nthinoType: TASK-TODO\n---\nold task');
+  const plugin = createPlugin();
+  await plugin.onload();
+  await plugin.capture('native file');
+  assert.match(state.contents.get('memo.md')!, /> \[!memo\]/);
+  plugin.settings.storageMode = 'multi';
+  await plugin.capture('native task', true);
+  assert.equal(plugin.list().length, 4);
+  const task = () => plugin.list().find(m => m.content === 'native task')!;
+  await plugin.toggleTask(task());
+  assert.match(task().path, /^Memo\//);
+  assert.match(task().raw, /memoType: TASK-DONE/);
+  assert.doesNotMatch(task().raw, /thino/i);
+  assert.equal(state.contents.get(oldFile), header);
+
+  await plugin.reimportSettings();
+  await plugin.capture('shared card', true);
+  assert.match(state.contents.get(oldFile)!, /> \[!thino\] [^\n]+\[thinoType::TASK-TODO\] %%\n> shared card/);
+  plugin.settings.storageMode = 'multi';
+  await plugin.capture('shared task', true);
+  const shared = plugin.list().find(m => m.content === 'shared task')!;
+  assert.match(shared.path, /^OldCards\//);
+  assert.match(shared.raw, /thinoType: TASK-TODO/);
+  assert.equal(plugin.list().length, 6);
 });

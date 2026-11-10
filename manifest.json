@@ -1,9 +1,9 @@
 {
   "id": "simple-memo",
   "name": "Simple Memo",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "minAppVersion": "1.7.2",
-  "description": "Capture and organize memos in daily notes with tags, tasks, search, a calendar, and a heatmap.",
+  "description": "Capture memos in daily notes, one shared file, or one note per memo, with tags, tasks, and search.",
   "author": "bitxinyu",
   "isDesktopOnly": false,
   "authorUrl": "https://github.com/bitxinyu"

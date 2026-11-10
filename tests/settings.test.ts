@@ -20,3 +20,16 @@ test('unsupported sources and format produce honest migration warnings',()=>{
  const r=importThinoSettings({MemoSaveLocation:'CANVAS',DefaultTimePrefix:'h:mm A',FetchMemosFromNote:true});
  assert.equal(r.settings.timeFormat,'HH:mm'); assert.equal(r.report.warnings.length,3);
 });
+test('imports Thino FILE and MULTI write destinations and rejects unsafe imported paths', () => {
+ const paths = { MemoDefaultSingleFilePath: 'Cards/archive.thino.md', MemoDefaultMultiFilePath: 'Collection/Memos' };
+ for (const mode of ['FILE', 'MULTI']) {
+  const { settings, report } = importThinoSettings({ MemoSaveLocation: mode, MemoOtherSaveLocation: paths });
+  assert.equal(settings.storageMode, mode.toLowerCase());
+  assert.equal(settings.singleFile, paths.MemoDefaultSingleFilePath);
+  assert.equal(settings.multiFolder, paths.MemoDefaultMultiFilePath);
+  assert.deepEqual(report.warnings, []);
+ }
+ const bad = importThinoSettings({ MemoOtherSaveLocation: { MemoDefaultSingleFilePath: '../notes.md' } });
+ assert.equal(bad.settings.singleFile, 'basic.thino.md');
+ assert.ok(bad.report.warnings.length);
+});

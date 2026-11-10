@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-一个 Obsidian 本地便签插件。便签保存在日记中，无需账号或订阅。
+一个 Obsidian 本地便签插件。便签保存在 Markdown 文件中，无需账号或订阅。
 
 ![Simple Memo 演示界面](docs/screenshots/simple-memo.png)
 
@@ -34,18 +34,18 @@
 
 命令面板还提供「快速记录」和「将选中文本复制为便签」，可在 Obsidian 设置中绑定快捷键。
 
-新安装默认将日记保存在 `Journal` 文件夹。使用已有日记时，请在「设置 → Simple Memo」中调整日记目录和日期格式。
+在「设置 → Simple Memo」可选择日记（默认）、单文件或每条便签独立成篇，对应的默认位置是 `Journal/`、`memo.md` 和 `Memo/`。切换方式只影响新便签。
 
 ## Thino 兼容
 
-首次启用会自动继承已有 Thino 的兼容设置，直接读取原有每日便签，包括置顶和归档状态，无需转换。目前仅支持每日笔记来源。
+新便签默认使用 `[!memo]` 和 `memoType`。已有 Thino 便签可直接读取和编辑，写回时沿用原格式。
 
-可以保留原版 Thino，两者共用日记文件。通过 Simple Memo 删除的便签，需要在 Simple Memo 的回收站中恢复。
+要与原版 Thino 共用新便签，可在设置中导入 Thino 的存储位置。
 
 ## 其他说明
 
-- 便签正文保存在日记中。备份或迁移时，如需保留草稿、回收站和已保存的筛选，请同时保留 `.obsidian/plugins/simple-memo/data.json`。
+- 便签正文保存在 Markdown 文件中。备份或迁移时，如需保留草稿、回收站和已保存的筛选，请同时保留 `.obsidian/plugins/simple-memo/data.json`。
 - 同步使用笔记库现有的同步方案，插件不提供同步服务。
 - 已在 macOS、Obsidian 1.14.4 上验证。保留移动端支持，移动设备及多设备同时编辑尚未实机验证。
-- 独立实现，与 Thino 无隶属关系；兼容其每日笔记格式。
+- 独立实现，与 Thino 无隶属关系。
 - 开源协议：[MIT](LICENSE)。

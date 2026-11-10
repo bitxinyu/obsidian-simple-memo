@@ -369,7 +369,7 @@ export class MemoView extends ItemView {
 
   private matchingTrash(): TrashEntry[] {
     const bounds = dateBounds(this.filter, new Date(), this.controller.settings.weekStart);
-    return this.controller.data.trash.filter(entry => matchesMemo(entry.memo, this.filter, bounds))
+    return this.controller.listTrash().filter(entry => matchesMemo(entry.memo, this.filter, bounds))
       .sort((a, b) => this.filter.oldestFirst ? a.deletedAt.localeCompare(b.deletedAt) : b.deletedAt.localeCompare(a.deletedAt));
   }
 
@@ -407,7 +407,7 @@ export class MemoView extends ItemView {
     this.resultCount.setText(String(memos.length));
     this.resultCount.setAttribute('aria-label', `${memos.length} 条便签`);
     if (trash && entries.length) {
-      this.listEl.createDiv({ cls: 'st-trash-note', text: '删除的内容保存在本插件回收站中，可恢复到原笔记。' });
+      this.listEl.createDiv({ cls: 'st-trash-note', text: '可将删除的便签恢复到原笔记。' });
     }
     if (!memos.length) {
       const empty = this.listEl.createDiv({ cls: 'st-empty' });

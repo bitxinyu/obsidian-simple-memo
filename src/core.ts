@@ -4,7 +4,7 @@ interface Line { text: string; start: number; end: number; fullEnd: number; eol:
 interface Heading { level: number; title: string }
 const inlineField = /\[(?:archived|deleted|pinned)::[^\]\r\n]*\]/gi;
 
-function linesOf(source: string): Line[] {
+export function linesOf(source: string): Line[] {
   const lines: Line[] = [];
   const newline = /\r\n|\n|\r/g;
   let start = 0;
@@ -19,8 +19,8 @@ function linesOf(source: string): Line[] {
   return lines;
 }
 
-function newlineOf(source: string): string { return /\r\n|\n|\r/.exec(source)?.[0] ?? '\n'; }
-function withNewline(text: string, newline: string): string { return text.replace(/\r\n|\n|\r/g, newline); }
+export function newlineOf(source: string): string { return /\r\n|\n|\r/.exec(source)?.[0] ?? '\n'; }
+export function withNewline(text: string, newline: string): string { return text.replace(/\r\n|\n|\r/g, newline); }
 function escapeRegex(text: string): string { return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 
 /** Explicit editor action only: preserve intentional indentation during normal saves. */
@@ -43,7 +43,7 @@ export function removeCommonIndent(content: string): string {
 }
 
 /** Mark YAML and fenced code before parsing: timestamp-looking examples are never notes. */
-function protectedLines(lines: Line[]): { flags: boolean[]; unclosed: boolean } {
+export function protectedLines(lines: Line[]): { flags: boolean[]; unclosed: boolean } {
   const flags = lines.map(() => false);
   let yaml = lines[0]?.text.replace(/^\uFEFF/, '') === '---';
   let fence: { char: string; length: number } | undefined;
@@ -295,6 +295,11 @@ function hash(text: string): string {
   return value.toString(16).padStart(16, '0');
 }
 
+export function contentTags(content: string): string[] {
+  return [...new Set([...content.matchAll(/(?:^|[\s(])#([\p{L}\p{N}\p{M}_/-]+)/gu)]
+    .map(tag => tag[1]).filter(tag => !/^\d+$/.test(tag)))];
+}
+
 export function parseMemos(source: string, path: string, date: string, settings: Settings): Memo[] {
   const lines = linesOf(source);
   const protected_ = protectedLines(lines).flags;
@@ -322,8 +327,7 @@ export function parseMemos(source: string, path: string, date: string, settings:
     const digest = hash(raw);
     const occurrence = occurrences.get(digest) ?? 0;
     occurrences.set(digest, occurrence + 1);
-    const tags = [...new Set([...content.matchAll(/(?:^|[\s(])#([\p{L}\p{N}\p{M}_/-]+)/gu)]
-      .map(tag => tag[1]).filter(tag => !/^\d+$/.test(tag)))];
+    const tags = contentTags(content);
     memos.push({ key: `${path}::${blockId ? `^${blockId}` : `${digest}:${occurrence}`}`,
       path, date, time: match[2], content, raw, start: lines[i].start, end: lines[last].end,
       line: i + 1, task: match[1] === undefined ? null : match[1] === ' ' ? 'open' : 'done', tags, blockId });

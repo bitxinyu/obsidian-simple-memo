@@ -1,5 +1,6 @@
 import type { Settings, ImportReport } from './types';
 export const defaultSettings: Settings = {
+    storageMode: 'daily', singleFile: 'memo.md', multiFolder: 'Memo',
     folder: 'Journal', dateFormat: 'YYYY-MM-DD', timeFormat: 'HH:mm', template: '',
     processHeading: '', insertHeading: '', defaultTask: false, defaultTag: '',
     username: '', saveLabel: '记录', editorPosition: 'top', showTime: true, showDate: true,
@@ -15,6 +16,15 @@ export function safePath(value: string): string {
 }
 export function validateSettings(s: Settings): Settings {
     const result = { ...s, folder: safePath(s.folder), template: safePath(s.template) };
+    result.singleFile = safePath(s.singleFile);
+    result.multiFolder = safePath(s.multiFolder);
+    if (!result.singleFile.endsWith('.md') || !result.multiFolder ||
+        [result.singleFile, result.multiFolder].some(path => path.split('/').some(part => !part || part.startsWith('.'))))
+        throw new Error('单文件须为笔记库内的 .md 文件，多文件目录须为可见且非空的目录。');
+    if (result.singleFile === result.multiFolder || result.multiFolder.startsWith(result.singleFile + '/'))
+        throw new Error('单文件路径不能同时作为文件夹使用。');
+    if (!['daily', 'file', 'multi'].includes(result.storageMode))
+        throw new Error('未知的便签保存方式');
     if (!s.dateFormat.trim() || !/Y/.test(s.dateFormat) || !/M/.test(s.dateFormat) || !/D/.test(s.dateFormat))
         throw new Error('日期格式需要包含年、月、日，例如 YYYY-MM-DD');
     safePath(s.dateFormat);
@@ -75,8 +85,25 @@ export function importThinoSettings(thino: Record<string, unknown>, daily: Recor
         warnings.push(`时间格式 ${settings.timeFormat} 暂不支持，使用 HH:mm。`);
         settings.timeFormat = 'HH:mm';
     }
-    if (thino.MemoSaveLocation && !['DAILY', 'JOURNAL'].some(location => thino.MemoSaveLocation === location))
-        warnings.push('当前插件只读取日记来源；其他保存来源未导入。');
+    // Preserve the original locations for reading even when new memos go elsewhere.
+    settings.singleFile = 'basic.thino.md';
+    settings.multiFolder = 'Thino';
+    const locations = asRecord(thino.MemoOtherSaveLocation);
+    for (const [from, to] of [['MemoDefaultSingleFilePath', 'singleFile'], ['MemoDefaultMultiFilePath', 'multiFolder']] as const) {
+        if (typeof locations[from] !== 'string' || !locations[from]) continue;
+        try {
+            settings[to] = validateSettings({ ...settings, [to]: locations[from] })[to];
+            mapped.push(from);
+        } catch { warnings.push(`未导入无效路径：${from}`); }
+    }
+    const enabled = thino.EnabledLocationList;
+    const mode = Array.isArray(enabled) && enabled.length === 1 ? asRecord(enabled[0]).value ?? thino.MemoSaveLocation : thino.MemoSaveLocation;
+    if (mode === 'FILE' || mode === 'MULTI') {
+        settings.storageMode = mode === 'FILE' ? 'file' : 'multi';
+        mapped.push('MemoSaveLocation');
+    } else if (mode && mode !== 'DAILY' && mode !== 'JOURNAL') {
+        warnings.push('未支持此保存来源，新便签将写入日记。');
+    }
     if (journalSettings.granularity && journalSettings.granularity !== 'day')
         warnings.push('周/月/年日记尚不支持，仅导入每日笔记设置。');
     if (thino.DefaultMemoComposition && thino.DefaultMemoComposition !== '{TIME} {CONTENT}')
@@ -87,5 +114,5 @@ export function importThinoSettings(thino: Record<string, unknown>, daily: Recor
         warnings.push('自动添加标签规则未导入，可在设置中指定默认标签。');
     if (thino.UseButtonToShowEditor)
         warnings.push('编辑器默认直接显示。');
-    return { settings: validateSettings(settings), report: { source: 'obsidian-memos/data.json', importedAt: new Date().toISOString(), mapped, warnings } };
+    return { settings: validateSettings(settings), report: { storagePaths: { singleFile: settings.singleFile, multiFolder: settings.multiFolder }, source: 'obsidian-memos/data.json', importedAt: new Date().toISOString(), mapped, warnings } };
 }

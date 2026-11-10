@@ -1,8 +1,8 @@
 {
   "name": "obsidian-simple-memo",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "private": true,
-  "description": "A local, membership-free memo plugin with Thino daily-note compatibility",
+  "description": "A local, membership-free memo plugin with Thino Daily, File, and Multi compatibility",
   "scripts": {
     "build": "tsc --noEmit && node esbuild.config.mjs",
     "dev": "node esbuild.config.mjs --watch",
@@ -31,5 +31,8 @@
   "bugs": {
     "url": "https://github.com/bitxinyu/obsidian-simple-memo/issues"
   },
-  "homepage": "https://github.com/bitxinyu/obsidian-simple-memo#readme"
+  "homepage": "https://github.com/bitxinyu/obsidian-simple-memo#readme",
+  "dependencies": {
+    "yaml": "2.9.1"
+  }
 }

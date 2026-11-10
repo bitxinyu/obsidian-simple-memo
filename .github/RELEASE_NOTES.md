@@ -1,8 +1,7 @@
-Simple Memo 1.0.9
+Simple Memo 1.0.10
 
-- Tag and note-link completion.
-- Saved combined filters with date ranges.
-- Copy all filtered memos as date-grouped Markdown, with optional source links.
+- Choose where to save new memos: daily notes, a shared `memo.md` file, or one Markdown note per memo in `Memo/`.
+- Read and edit existing Thino single-file and multi-file memos in their original format.
 
 Requires Obsidian 1.7.2 or later.
 
